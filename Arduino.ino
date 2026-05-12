@@ -1,146 +1,170 @@
-#include "I2Cdev.h"
-#include <MPU6050.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <Wire.h>
 
 // PINOUT
-#define IR_LEFT      12
-#define IR_RIGHT     13
-#define ECHO          2
-#define TRIG          3
+#define IR_LEFT 12
+#define IR_RIGHT 13
+#define ECHO 2
+#define TRIG 3
 
-#define LEFT_IN1      4
-#define LEFT_IN2      5
-#define RIGHT_IN1     6
-#define RIGHT_IN2     7
+#define LEFT_IN1 4
+#define LEFT_IN2 5
+#define RIGHT_IN1 6
+#define RIGHT_IN2 7
 
-#define LED_YELLOW    8
-#define LED_RED       9
-#define BUZZER       10
-#define LED_GREEN    11
+#define LED_YELLOW 8
+#define LED_RED 9
+#define LED_GREEN 1
+#define BUZZER 11
 
-#define SPEED_NORMAL   255
-#define SPEED_SLOW     180
-#define OBSTACLE_DIST  30
+#define SPEED_NORMAL 255
+#define SPEED_SLOW 180
+#define OBSTACLE_DIST 30
+
+// THRESHOLDS (Adjusted for m/s^2)
+// Previously 9000 raw units ≈ 5.4 m/s^2
+// Previously 4000 raw units ≈ 2.4 m/s^2
+#define TILT_THRESHOLD 5.5
+#define VIBRATION_THRESHOLD 2.5
 
 typedef enum { MODE_IDLE, MODE_A, MODE_B } RobotMode;
 RobotMode currentMode = MODE_A;
 
 struct SensorData {
-  int16_t accelX, accelY, accelZ;
+  float accelX, accelY, accelZ;
   bool tiltDetected = false;
   bool vibrationDetected = false;
 } sensor;
 
-int16_t prevX=0, prevY=0, prevZ=0;
-MPU6050 mpu;
+float prevX = 0, prevY = 0, prevZ = 0;
+Adafruit_MPU6050 mpu;
 
 void setup() {
   Serial.begin(9600);
-  Wire.begin();
-  Wire.setClock(400000); 
-  Serial.println(F("\n=== STARTING SETUP ==="));
-  
-  pinMode(LED_GREEN, OUTPUT);
-  digitalWrite(LED_GREEN, HIGH);
-  
-  // Motor pins
-  pinMode(LEFT_IN1, OUTPUT); pinMode(LEFT_IN2, OUTPUT);
-  pinMode(RIGHT_IN1, OUTPUT); pinMode(RIGHT_IN2, OUTPUT);
-  stopMotors();
-  
-  Serial.println(F("Motor pins configured"));
+  while (!Serial)
+    delay(10); // Wait for Serial Monitor
 
-  // Ultrasonic
+  Serial.println(F("\n=== STARTING SETUP ==="));
+
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  digitalWrite(LED_GREEN, HIGH);
+
+  // Motor pins
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+  stopMotors();
+
+  // Ultrasonic & IR
   pinMode(TRIG, OUTPUT);
   pinMode(ECHO, INPUT);
-  Serial.println(F("Ultrasonic pins configured"));
-
-  // IR
   pinMode(IR_LEFT, INPUT);
   pinMode(IR_RIGHT, INPUT);
-  Serial.println(F("IR pins configured"));
 
-  // MPU6050
-  Serial.println(F("Starting Wire & MPU6050..."));
-  Wire.begin();
-  mpu.initialize();
-  Serial.println(F("mpu.initialize() done"));
-
-  bool connected = mpu.testConnection();
-  Serial.print(F("MPU6050 testConnection: "));
-  Serial.println(connected ? "SUCCESS" : "FAILED");
-
-  if (!connected) {
+  // Initialize Adafruit MPU6050
+  if (!mpu.begin()) {
     Serial.println(F("ERROR: MPU6050 not found! Check wiring (A4/A5)"));
-    while(true) {
-      digitalWrite(LED_RED, !digitalRead(LED_RED));
+    while (1) {
+      digitalWrite(LED_RED, HIGH);
+      delay(200);
+      digitalWrite(LED_RED, LOW);
       delay(200);
     }
   }
 
-  Serial.println(F("=== SETUP COMPLETE - ENTERING LOOP ==="));
-  Serial.println(F("Robot should start moving now..."));
+  Serial.println(F("MPU6050 Found!"));
+
+  // Set sensor ranges
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  Serial.println(F("=== SETUP COMPLETE ==="));
 }
 
 void loop() {
-  static unsigned long last = 0;
-  
+  static unsigned long lastDistCheck = 0;
+
   readSensors();
   checkThresholds();
-  
-  Serial.print(F("Loop | Tilt:")); Serial.print(sensor.tiltDetected);
-  Serial.print(F(" Vib:")); Serial.print(sensor.vibrationDetected);
-  Serial.print(F(" | Mode:")); Serial.println(currentMode);
 
   if (sensor.tiltDetected) {
     Serial.println(F("TILT DETECTED → STOPPED"));
     stopMotors();
-  } 
-  else if (currentMode == MODE_A) {
+  } else if (currentMode == MODE_A) {
     runModeADebug();
   } else {
     stopMotors();
   }
 
-  if (millis() - last > 800) {
+  // Non-blocking distance print
+  if (millis() - lastDistCheck > 800) {
     long d = getDistance();
-    Serial.print(F("Distance: ")); Serial.print(d); Serial.println(F(" cm"));
-    last = millis();
+    Serial.print(F("Dist: "));
+    Serial.print(d);
+    Serial.print(F("cm | X:"));
+    Serial.print(sensor.accelX);
+    Serial.print(F(" Y:"));
+    Serial.println(sensor.accelY);
+    lastDistCheck = millis();
   }
 
-  delay(100);
+  delay(50); // Small delay for stability
 }
 
 // =============================================================================
+
+void readSensors() {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  sensor.accelX = a.acceleration.x;
+  sensor.accelY = a.acceleration.y;
+  sensor.accelZ = a.acceleration.z;
+}
+
+void checkThresholds() {
+  // Tilt detection (using m/s^2)
+  sensor.tiltDetected = (abs(sensor.accelX) > TILT_THRESHOLD) ||
+                        (abs(sensor.accelY) > TILT_THRESHOLD);
+
+  // Vibration detection (difference between readings)
+  float dX = abs(sensor.accelX - prevX);
+  float dY = abs(sensor.accelY - prevY);
+  float dZ = abs(sensor.accelZ - prevZ);
+
+  sensor.vibrationDetected = (dX > VIBRATION_THRESHOLD) ||
+                             (dY > VIBRATION_THRESHOLD) ||
+                             (dZ > VIBRATION_THRESHOLD);
+
+  prevX = sensor.accelX;
+  prevY = sensor.accelY;
+  prevZ = sensor.accelZ;
+}
+
 void runModeADebug() {
   long distance = getDistance();
   bool cliffL = digitalRead(IR_LEFT) == LOW;
   bool cliffR = digitalRead(IR_RIGHT) == LOW;
 
   if (cliffL || cliffR) {
-    Serial.println(F("[CLIFF] Avoiding..."));
     moveBackward(200);
     delay(300);
     turnRight(220);
     delay(450);
-  }
-  else if (distance < OBSTACLE_DIST && distance > 5) {
-    Serial.println(F("[OBSTACLE] Avoiding..."));
+  } else if (distance < OBSTACLE_DIST && distance > 2) {
     stopMotors();
-    delay(150);
+    delay(100);
     moveBackward(180);
     delay(300);
     turnLeft(220);
     delay(400);
-  }
-  else {
-    Serial.println(F("[FORWARD] Moving..."));
+  } else {
     moveForward(SPEED_NORMAL);
   }
-}
-
-void readSensors() {
-  mpu.getAcceleration(&sensor.accelX, &sensor.accelY, &sensor.accelZ);
 }
 
 long getDistance() {
@@ -149,45 +173,41 @@ long getDistance() {
   digitalWrite(TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG, LOW);
-  long duration = pulseIn(ECHO, HIGH, 20000);
+  long duration = pulseIn(ECHO, HIGH, 25000); // 25ms timeout
   return duration * 0.0343 / 2;
 }
 
-void checkThresholds() {
-  sensor.tiltDetected = (abs(sensor.accelX) > 9000) || (abs(sensor.accelY) > 9000);
-
-  int16_t dX = abs(sensor.accelX - prevX);
-  int16_t dY = abs(sensor.accelY - prevY);
-  int16_t dZ = abs(sensor.accelZ - prevZ);
-
-  sensor.vibrationDetected = (dX > 4000) || (dY > 4000) || (dZ > 4000);
-
-  prevX = sensor.accelX;
-  prevY = sensor.accelY;
-  prevZ = sensor.accelZ;
-}
-
 void moveForward(int speed) {
-  analogWrite(LEFT_IN1, speed);  digitalWrite(LEFT_IN2, LOW);
-  analogWrite(RIGHT_IN1, speed); digitalWrite(RIGHT_IN2, LOW);
+  analogWrite(LEFT_IN1, speed);
+  digitalWrite(LEFT_IN2, LOW);
+  analogWrite(RIGHT_IN1, speed);
+  digitalWrite(RIGHT_IN2, LOW);
 }
 
 void moveBackward(int speed) {
-  analogWrite(LEFT_IN1, LOW);   digitalWrite(LEFT_IN2, HIGH);
-  analogWrite(RIGHT_IN1, LOW);  digitalWrite(RIGHT_IN2, HIGH);
+  digitalWrite(LEFT_IN1, LOW);
+  analogWrite(LEFT_IN2, speed);
+  digitalWrite(RIGHT_IN1, LOW);
+  analogWrite(RIGHT_IN2, speed);
 }
 
 void turnLeft(int speed) {
-  analogWrite(LEFT_IN1, LOW);    digitalWrite(LEFT_IN2, HIGH);
-  analogWrite(RIGHT_IN1, speed); digitalWrite(RIGHT_IN2, LOW);
+  digitalWrite(LEFT_IN1, LOW);
+  analogWrite(LEFT_IN2, speed);
+  analogWrite(RIGHT_IN1, speed);
+  digitalWrite(RIGHT_IN2, LOW);
 }
 
 void turnRight(int speed) {
-  analogWrite(LEFT_IN1, speed);  digitalWrite(LEFT_IN2, LOW);
-  analogWrite(RIGHT_IN1, LOW);   digitalWrite(RIGHT_IN2, HIGH);
+  analogWrite(LEFT_IN1, speed);
+  digitalWrite(LEFT_IN2, LOW);
+  digitalWrite(RIGHT_IN1, LOW);
+  analogWrite(RIGHT_IN2, speed);
 }
 
 void stopMotors() {
-  digitalWrite(LEFT_IN1, LOW); digitalWrite(LEFT_IN2, LOW);
-  digitalWrite(RIGHT_IN1, LOW); digitalWrite(RIGHT_IN2, LOW);
+  digitalWrite(LEFT_IN1, LOW);
+  digitalWrite(LEFT_IN2, LOW);
+  digitalWrite(RIGHT_IN1, LOW);
+  digitalWrite(RIGHT_IN2, LOW);
 }
