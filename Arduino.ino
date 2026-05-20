@@ -20,13 +20,15 @@
 
 #define SPEED_NORMAL 255
 #define SPEED_SLOW 180
-#define OBSTACLE_DIST 30
+#define OBSTACLE_DIST 20
 
 // THRESHOLDS (Adjusted for m/s^2)
+// Previously 9000 raw units ≈ 5.4 m/s^2
+// Previously 4000 raw units ≈ 2.4 m/s^2
 #define TILT_THRESHOLD 5.5
-#define VIBRATION_THRESHOLD 2.5
+#define VIBRATION_THRESHOLD 30
 
-#define GYRO_VIBRATION_THRESHOLD 1.75
+#define GYRO_VIBRATION_THRESHOLD 30
 
 typedef enum { MODE_IDLE, MODE_A, MODE_B } RobotMode;
 RobotMode currentMode = MODE_A;
@@ -88,34 +90,65 @@ void setup() {
 
 void loop() {
   static unsigned long lastDistCheck = 0;
+  static long cachedDistance = 999;  // ADD THIS
 
   readSensors();
   checkThresholds();
+  updateIndicators();
+
+  cachedDistance = getDistance();  // ONE call per loop, store it
 
   if (sensor.tiltDetected) {
     Serial.println(F("TILT DETECTED → STOPPED"));
     stopMotors();
   } else if (currentMode == MODE_A) {
-    runModeADebug();
+    runModeA(cachedDistance);      // pass it in
   } else if (currentMode == MODE_B) {
-    runModeB();
+    runModeB(cachedDistance);      // pass it in
   } else {
     stopMotors();
   }
 
-  // Non-blocking distance print
   if (millis() - lastDistCheck > 800) {
-    long d = getDistance();
     Serial.print(F("Dist: "));
-    Serial.print(d);
+    Serial.print(cachedDistance);  // reuse, no second sensor call
     Serial.print(F("cm | X:"));
     Serial.print(sensor.accelX);
     Serial.print(F(" Y:"));
     Serial.println(sensor.accelY);
     lastDistCheck = millis();
+    Serial.print(F(" | IRL:"));
+    Serial.print(digitalRead(IR_LEFT));
+    Serial.print(F(" IRR:"));
+    Serial.println(digitalRead(IR_RIGHT));
   }
 
-  delay(50); // Small delay for stability
+  delay(50);
+}
+long getDistance() {
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  long duration = pulseIn(ECHO, HIGH, 25000);
+  if (duration == 0) return 999;  // timeout = no obstacle, return large value
+  return duration * 0.0343 / 2;
+}
+
+void updateIndicators() {
+  if (sensor.tiltDetected) {
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_YELLOW, LOW);
+    tone(BUZZER, 1000);         // 1kHz tone while tilted
+  } else {
+    digitalWrite(LED_RED, LOW);
+    noTone(BUZZER);
+
+    digitalWrite(LED_GREEN, currentMode == MODE_A ? HIGH : LOW);
+    digitalWrite(LED_YELLOW, currentMode == MODE_B ? HIGH : LOW);
+  }
 }
 
 void readSensors() {
@@ -132,11 +165,9 @@ void readSensors() {
 }
 
 void checkThresholds() {
-  // Tilt (unchanged)
   sensor.tiltDetected = (abs(sensor.accelX) > TILT_THRESHOLD) ||
                         (abs(sensor.accelY) > TILT_THRESHOLD);
 
-  // Accel-based vibration (delta between readings)
   float dX = abs(sensor.accelX - prevX);
   float dY = abs(sensor.accelY - prevY);
   float dZ = abs(sensor.accelZ - prevZ);
@@ -144,29 +175,29 @@ void checkThresholds() {
                         (dY > VIBRATION_THRESHOLD) ||
                         (dZ > VIBRATION_THRESHOLD);
 
-  // Gyro-based vibration (instantaneous rotational rate)
   bool gyroVibration = (abs(sensor.gyroX) > GYRO_VIBRATION_THRESHOLD) ||
                        (abs(sensor.gyroY) > GYRO_VIBRATION_THRESHOLD) ||
                        (abs(sensor.gyroZ) > GYRO_VIBRATION_THRESHOLD);
 
   sensor.vibrationDetected = accelVibration || gyroVibration;
 
+  // Switch mode based on vibration
+  if (sensor.vibrationDetected) {
+    currentMode = MODE_B;
+  } else {
+    currentMode = MODE_A;
+  }
+
   prevX = sensor.accelX;
   prevY = sensor.accelY;
   prevZ = sensor.accelZ;
 }
 
-void runModeADebug() {
-  long distance = getDistance();
-  bool cliffL = digitalRead(IR_LEFT) == LOW;
-  bool cliffR = digitalRead(IR_RIGHT) == LOW;
+void runModeA(long distance) {
+  bool cliffL = digitalRead(IR_LEFT) == HIGH;
+  bool cliffR = digitalRead(IR_RIGHT) == HIGH;
 
-  if (cliffL || cliffR) {
-    moveBackward(200);
-    delay(300);
-    turnRight(220);
-    delay(450);
-  } else if (distance < OBSTACLE_DIST && distance > 2) {
+   if (distance < OBSTACLE_DIST) {  // > 2 check removed, 999 handles timeout
     stopMotors();
     delay(100);
     moveBackward(180);
@@ -176,16 +207,6 @@ void runModeADebug() {
   } else {
     moveForward(SPEED_NORMAL);
   }
-}
-
-long getDistance() {
-  digitalWrite(TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
-  long duration = pulseIn(ECHO, HIGH, 25000); // 25ms timeout
-  return duration * 0.0343 / 2;
 }
 
 void pulsedTurn(bool rightTurn, int speed, int onMs, int offMs, int pulses) {
@@ -200,16 +221,11 @@ void pulsedTurn(bool rightTurn, int speed, int onMs, int offMs, int pulses) {
   }
 }
 
-void runModeB() {
-  long distance = getDistance();
+void runModeB(long distance) {
   bool cliffL = digitalRead(IR_LEFT) == LOW;
   bool cliffR = digitalRead(IR_RIGHT) == LOW;
 
-  if (cliffL || cliffR) {
-    moveBackward(200);
-    delay(300);
-    pulsedTurn(true, 220, 80, 60, 6);
-  } else if (distance < OBSTACLE_DIST && distance > 2) {
+  if (distance < OBSTACLE_DIST) {
     stopMotors();
     delay(100);
     moveBackward(100);
