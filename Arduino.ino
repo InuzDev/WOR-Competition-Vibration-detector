@@ -28,8 +28,7 @@
 // ============================================================
 #define TILT_MODERATE 3.5 // Inicio de inclinación moderada → LED amarillo
 #define TILT_CRITICAL 5.5 // Inclinación crítica → LED rojo + buzzer + stop
-#define VIBRATION_LOW                                                          \
-  30.0 // Inicio de vibración moderada → MODE_B + LED amarillo
+#define VIBRATION_LOW 30.0 // Inicio de vibración moderada → MODE_B + LED amarillo
 #define VIBRATION_HIGH 40.0 // Vibración crítica → alerta (LED rojo + buzzer)
 #define GYRO_VIBRATION_LOW 30.0  // Inicio de vibración giroscópica moderada
 #define GYRO_VIBRATION_HIGH 40.0 // Vibración giroscópica crítica
