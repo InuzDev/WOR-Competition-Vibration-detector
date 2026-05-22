@@ -2,9 +2,9 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
-// PINOUT
-#define IR_LEFT 12
-#define IR_RIGHT 13
+// ============================================================
+// PINOUT - Definición de pines del hardware
+// ============================================================
 #define ECHO 2
 #define TRIG 3
 
@@ -15,61 +15,73 @@
 
 #define LED_YELLOW 8
 #define LED_RED 9
-#define LED_GREEN 11
 #define BUZZER 10
+#define LED_GREEN 11
 
 #define SPEED_NORMAL 255
 #define SPEED_SLOW 180
 #define OBSTACLE_DIST 20
 
-// THRESHOLDS (Adjusted for m/s^2)
-// Previously 9000 raw units ≈ 5.4 m/s^2
-// Previously 4000 raw units ≈ 2.4 m/s^2
-#define TILT_THRESHOLD 5.5
-#define VIBRATION_THRESHOLD 30
+// ============================================================
+// UMBRALES DE DETECCIÓN
+// Acelerómetro en m/s², giroscopio en rad/s
+// ============================================================
+#define TILT_THRESHOLD       5.5   // Inclinación crítica
+#define VIBRATION_LOW        30.0  // Inicio de vibración moderada → MODE_B + LED amarillo
+#define VIBRATION_HIGH       40.0  // Vibración crítica → alerta (LED rojo + buzzer)
+#define GYRO_VIBRATION_LOW   30.0  // Inicio de vibración giroscópica moderada
+#define GYRO_VIBRATION_HIGH  40.0  // Vibración giroscópica crítica
 
-#define GYRO_VIBRATION_THRESHOLD 30
-
+// ============================================================
+// ENUMERACIÓN DE MODOS
+// Define los modos de operación del robot
+// ============================================================
 typedef enum { MODE_IDLE, MODE_A, MODE_B } RobotMode;
 RobotMode currentMode = MODE_A;
 
+// ============================================================
+// ESTRUCTURA DE DATOS DEL SENSOR
+// Almacena lecturas del MPU6050 y flags de detección
+// ============================================================
 struct SensorData {
-  float accelX, accelY, accelZ;
-  float gyroX, gyroY, gyroZ;
-  bool tiltDetected = false;
-  bool vibrationDetected = false;
+  float accelX, accelY, accelZ;   // Aceleración en m/s²
+  float gyroX, gyroY, gyroZ;      // Velocidad angular en rad/s
+  bool tiltDetected = false;       // Inclinación crítica detectada
+  bool vibrationDetected = false;  // Vibración moderada detectada
+  bool alertDetected = false;      // Vibración crítica detectada
 } sensor;
 
 float prevX = 0, prevY = 0, prevZ = 0;
 Adafruit_MPU6050 mpu;
 
+// ============================================================
+// SETUP
+// Inicializa pines, comunicación serial y el MPU6050
+// ============================================================
 void setup() {
   Serial.begin(9600);
-  while (!Serial)
-    delay(10); // Wait for Serial Monitor
+  while (!Serial) delay(10);
 
-  Serial.println(F("\n=== STARTING SETUP ==="));
+  Serial.println(F("\n=== INICIANDO SETUP ==="));
 
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED, OUTPUT);
-  digitalWrite(LED_GREEN, HIGH);
+  pinMode(LED_YELLOW, OUTPUT);
 
-  // Motor pins
+  // Pines de motores
   pinMode(LEFT_IN1, OUTPUT);
   pinMode(LEFT_IN2, OUTPUT);
   pinMode(RIGHT_IN1, OUTPUT);
   pinMode(RIGHT_IN2, OUTPUT);
   stopMotors();
 
-  // Ultrasonic & IR
+  // Sensor ultrasónico
   pinMode(TRIG, OUTPUT);
   pinMode(ECHO, INPUT);
-  pinMode(IR_LEFT, INPUT);
-  pinMode(IR_RIGHT, INPUT);
 
-  // Initialize Adafruit MPU6050
+  // Inicializar MPU6050
   if (!mpu.begin()) {
-    Serial.println(F("ERROR: MPU6050 not found! Check wiring (A4/A5)"));
+    Serial.println(F("ERROR: MPU6050 no encontrado. Revisar cableado (A4/A5)"));
     while (1) {
       digitalWrite(LED_RED, HIGH);
       delay(200);
@@ -78,79 +90,57 @@ void setup() {
     }
   }
 
-  Serial.println(F("MPU6050 Found!"));
+  Serial.println(F("MPU6050 encontrado!"));
 
-  // Set sensor ranges
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  Serial.println(F("=== SETUP COMPLETE ==="));
+  Serial.println(F("=== SETUP COMPLETO ==="));
 }
 
+// ============================================================
+// LOOP PRINCIPAL
+// Lee sensores, evalúa umbrales, actualiza indicadores y
+// ejecuta el modo de operación correspondiente
+// ============================================================
 void loop() {
   static unsigned long lastDistCheck = 0;
-  static long cachedDistance = 999;  // ADD THIS
+  static long cachedDistance = 999;
 
   readSensors();
   checkThresholds();
   updateIndicators();
 
-  cachedDistance = getDistance();  // ONE call per loop, store it
+  cachedDistance = getDistance();
 
-  if (sensor.tiltDetected) {
-    Serial.println(F("TILT DETECTED → STOPPED"));
+  if (sensor.tiltDetected || sensor.alertDetected) {
     stopMotors();
   } else if (currentMode == MODE_A) {
-    runModeA(cachedDistance);      // pass it in
+    runModeA(cachedDistance);
   } else if (currentMode == MODE_B) {
-    runModeB(cachedDistance);      // pass it in
+    runModeB(cachedDistance);
   } else {
     stopMotors();
   }
 
   if (millis() - lastDistCheck > 800) {
-    Serial.print(F("Dist: "));
-    Serial.print(cachedDistance);  // reuse, no second sensor call
-    Serial.print(F("cm | X:"));
-    Serial.print(sensor.accelX);
-    Serial.print(F(" Y:"));
-    Serial.println(sensor.accelY);
+    Serial.print(F("Dist: "));   Serial.print(cachedDistance);
+    Serial.print(F("cm | X: ")); Serial.print(sensor.accelX);
+    Serial.print(F(" Y: "));     Serial.print(sensor.accelY);
+    Serial.print(F(" | Modo: "));
+    Serial.println(currentMode == MODE_A ? F("A") : F("B"));
     lastDistCheck = millis();
-    Serial.print(F(" | IRL:"));
-    Serial.print(digitalRead(IR_LEFT));
-    Serial.print(F(" IRR:"));
-    Serial.println(digitalRead(IR_RIGHT));
   }
 
   delay(50);
 }
-long getDistance() {
-  digitalWrite(TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
-  long duration = pulseIn(ECHO, HIGH, 25000);
-  if (duration == 0) return 999;  // timeout = no obstacle, return large value
-  return duration * 0.0343 / 2;
-}
 
-void updateIndicators() {
-  if (sensor.tiltDetected) {
-    digitalWrite(LED_RED, HIGH);
-    digitalWrite(LED_GREEN, LOW);
-    digitalWrite(LED_YELLOW, LOW);
-    tone(BUZZER, 1000);         // 1kHz tone while tilted
-  } else {
-    digitalWrite(LED_RED, LOW);
-    noTone(BUZZER);
-
-    digitalWrite(LED_GREEN, currentMode == MODE_A ? HIGH : LOW);
-    digitalWrite(LED_YELLOW, currentMode == MODE_B ? HIGH : LOW);
-  }
-}
-
+// ============================================================
+// readSensors
+// Lee los datos crudos del MPU6050 y los almacena en
+// la estructura global `sensor`
+// ============================================================
 void readSensors() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
@@ -164,25 +154,39 @@ void readSensors() {
   sensor.gyroZ = g.gyro.z;
 }
 
+// ============================================================
+// checkThresholds
+// Evalúa los datos del sensor contra los umbrales definidos.
+// Clasifica el estado en: normal, vibración moderada (MODE_B)
+// o vibración crítica (alerta). También detecta inclinación.
+// ============================================================
 void checkThresholds() {
+  // Detección de inclinación crítica
   sensor.tiltDetected = (abs(sensor.accelX) > TILT_THRESHOLD) ||
                         (abs(sensor.accelY) > TILT_THRESHOLD);
 
+  // Deltas del acelerómetro entre lecturas
   float dX = abs(sensor.accelX - prevX);
   float dY = abs(sensor.accelY - prevY);
   float dZ = abs(sensor.accelZ - prevZ);
-  bool accelVibration = (dX > VIBRATION_THRESHOLD) ||
-                        (dY > VIBRATION_THRESHOLD) ||
-                        (dZ > VIBRATION_THRESHOLD);
+  float maxAccelDelta = max(dX, max(dY, dZ));
 
-  bool gyroVibration = (abs(sensor.gyroX) > GYRO_VIBRATION_THRESHOLD) ||
-                       (abs(sensor.gyroY) > GYRO_VIBRATION_THRESHOLD) ||
-                       (abs(sensor.gyroZ) > GYRO_VIBRATION_THRESHOLD);
+  // Máximo valor instantáneo del giroscopio
+  float maxGyro = max(abs(sensor.gyroX), max(abs(sensor.gyroY), abs(sensor.gyroZ)));
 
-  sensor.vibrationDetected = accelVibration || gyroVibration;
+  // Clasificar nivel de vibración
+  bool accelAlert      = maxAccelDelta > VIBRATION_HIGH;
+  bool accelVibration  = maxAccelDelta > VIBRATION_LOW;
+  bool gyroAlert       = maxGyro > GYRO_VIBRATION_HIGH;
+  bool gyroVibration   = maxGyro > GYRO_VIBRATION_LOW;
 
-  // Switch mode based on vibration
-  if (sensor.vibrationDetected) {
+  sensor.alertDetected     = accelAlert || gyroAlert;
+  sensor.vibrationDetected = !sensor.alertDetected && (accelVibration || gyroVibration);
+
+  // Cambio de modo según nivel de vibración
+  if (sensor.alertDetected || sensor.tiltDetected) {
+    currentMode = MODE_IDLE;
+  } else if (sensor.vibrationDetected) {
     currentMode = MODE_B;
   } else {
     currentMode = MODE_A;
@@ -193,11 +197,53 @@ void checkThresholds() {
   prevZ = sensor.accelZ;
 }
 
-void runModeA(long distance) {
-  bool cliffL = digitalRead(IR_LEFT) == HIGH;
-  bool cliffR = digitalRead(IR_RIGHT) == HIGH;
+// ============================================================
+// updateIndicators
+// Controla los LEDs y el buzzer según el estado actual:
+//   - Alerta/inclinación → LED rojo + buzzer
+//   - MODE_B (vibración moderada) → LED amarillo
+//   - MODE_A (normal) → LED verde
+// ============================================================
+void updateIndicators() {
+  if (sensor.tiltDetected || sensor.alertDetected) {
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_YELLOW, LOW);
+    tone(BUZZER, 1000);
+    if (sensor.tiltDetected) Serial.println(F("INCLINACIÓN CRÍTICA → DETENIDO"));
+    if (sensor.alertDetected) Serial.println(F("VIBRACIÓN CRÍTICA → DETENIDO"));
+  } else {
+    digitalWrite(LED_RED, LOW);
+    noTone(BUZZER);
+    digitalWrite(LED_GREEN,  currentMode == MODE_A ? HIGH : LOW);
+    digitalWrite(LED_YELLOW, currentMode == MODE_B ? HIGH : LOW);
+  }
+}
 
-   if (distance < OBSTACLE_DIST) {  // > 2 check removed, 999 handles timeout
+// ============================================================
+// getDistance
+// Dispara el sensor ultrasónico HC-SR04 y retorna la
+// distancia en centímetros. Retorna 999 si hay timeout
+// (sin obstáculo detectado).
+// ============================================================
+long getDistance() {
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  long duration = pulseIn(ECHO, HIGH, 25000);
+  if (duration == 0) return 999;
+  return duration * 0.0343 / 2;
+}
+
+// ============================================================
+// runModeA
+// Modo de operación normal. Avanza hacia adelante y esquiva
+// obstáculos con reversa + giro izquierda.
+// ============================================================
+void runModeA(long distance) {
+  if (distance < OBSTACLE_DIST) {
     stopMotors();
     delay(100);
     moveBackward(180);
@@ -209,22 +255,13 @@ void runModeA(long distance) {
   }
 }
 
-void pulsedTurn(bool rightTurn, int speed, int onMs, int offMs, int pulses) {
-  for (int i = 0; i < pulses; i++) {
-    if (rightTurn)
-      turnRight(speed);
-    else
-      turnLeft(speed);
-    delay(onMs);
-    stopMotors();
-    delay(offMs);
-  }
-}
-
+// ============================================================
+// runModeB
+// Modo de vibración moderada. Igual que MODE_A pero usa
+// giros pulsados para evitar el giro de 360° causado por
+// las ruedas traseras de baja fricción.
+// ============================================================
 void runModeB(long distance) {
-  bool cliffL = digitalRead(IR_LEFT) == LOW;
-  bool cliffR = digitalRead(IR_RIGHT) == LOW;
-
   if (distance < OBSTACLE_DIST) {
     stopMotors();
     delay(100);
@@ -236,6 +273,31 @@ void runModeB(long distance) {
   }
 }
 
+// ============================================================
+// pulsedTurn
+// Realiza un giro en pulsos cortos para evitar que el robot
+// gire de más debido a las ruedas traseras de baja fricción.
+// Parámetros:
+//   rightTurn → true = derecha, false = izquierda
+//   speed     → velocidad PWM (0-255)
+//   onMs      → duración de cada pulso en ms
+//   offMs     → pausa entre pulsos en ms
+//   pulses    → cantidad de pulsos
+// ============================================================
+void pulsedTurn(bool rightTurn, int speed, int onMs, int offMs, int pulses) {
+  for (int i = 0; i < pulses; i++) {
+    if (rightTurn) turnRight(speed);
+    else           turnLeft(speed);
+    delay(onMs);
+    stopMotors();
+    delay(offMs);
+  }
+}
+
+// ============================================================
+// moveForward
+// Mueve el robot hacia adelante a la velocidad indicada
+// ============================================================
 void moveForward(int speed) {
   analogWrite(LEFT_IN1, speed);
   digitalWrite(LEFT_IN2, LOW);
@@ -243,6 +305,10 @@ void moveForward(int speed) {
   digitalWrite(RIGHT_IN2, LOW);
 }
 
+// ============================================================
+// moveBackward
+// Mueve el robot hacia atrás a la velocidad indicada
+// ============================================================
 void moveBackward(int speed) {
   digitalWrite(LEFT_IN1, LOW);
   analogWrite(LEFT_IN2, speed);
@@ -250,6 +316,11 @@ void moveBackward(int speed) {
   analogWrite(RIGHT_IN2, speed);
 }
 
+// ============================================================
+// turnLeft
+// Gira el robot hacia la izquierda (rueda izquierda atrás,
+// rueda derecha adelante)
+// ============================================================
 void turnLeft(int speed) {
   digitalWrite(LEFT_IN1, LOW);
   analogWrite(LEFT_IN2, speed);
@@ -257,6 +328,11 @@ void turnLeft(int speed) {
   digitalWrite(RIGHT_IN2, LOW);
 }
 
+// ============================================================
+// turnRight
+// Gira el robot hacia la derecha (rueda izquierda adelante,
+// rueda derecha atrás)
+// ============================================================
 void turnRight(int speed) {
   analogWrite(LEFT_IN1, speed);
   digitalWrite(LEFT_IN2, LOW);
@@ -264,6 +340,10 @@ void turnRight(int speed) {
   analogWrite(RIGHT_IN2, speed);
 }
 
+// ============================================================
+// stopMotors
+// Detiene ambos motores cortando todas las señales PWM
+// ============================================================
 void stopMotors() {
   digitalWrite(LEFT_IN1, LOW);
   digitalWrite(LEFT_IN2, LOW);
